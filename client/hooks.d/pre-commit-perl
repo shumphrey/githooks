@@ -1,0 +1,94 @@
+#!/usr/bin/env perl
+
+# A git commit hook that rejects:
+#  - perl linter failures
+#  - perl debug line errors
+#
+# The idea is this script gets called from a pre-commit hook with the name of
+# staged file to check
+
+## 'git diff --staged' - shows the difference between previous and staged commit
+## 'git show :$file'   - shows the contents of staged file
+
+## There are various problems with cat file | perl -c
+## I can't find why perl -c never works on google
+## Instead, I'm going to run perlcritic and perl -c on an actual file
+## by coping it to a temporary directory.
+
+use strict;
+use warnings;
+use Path::Tiny;
+use Perl::Critic;
+use IPC::Cmd qw/run/;
+
+my $file = shift @ARGV or die "./pre-commit-perl \$file\n";
+chomp($file);
+
+##############################################################################
+## Check for common stuff we leave in the file
+##
+## e.g. I use Data::Printer for debug statements
+## These shouldn't be committed.
+warn "Checking for bad stuff in $file\n" if $ENV{GIT_HOOK_DEBUG};
+my @badstuff = (
+    'use Data::Printer',
+    'use DDP',
+    '$DB::single',
+);
+my $diff = `git diff --staged $file`;
+for my $bad (@badstuff) {
+    if ( $diff =~ /\Q$bad\E/ ) {
+        reject("$file contains $bad");
+    }
+}
+
+##############################################################################
+## Run it through perlcritic
+##
+## We run perlcritic with --gentle and whatever .perlcritic rc is in effect
+## perlcritic rules should be discussed as a team.
+## Some rules, such as package name matching file name are not run, because
+## we use stdin with no filename
+## (could use tactic for perl -c)
+warn "Checking for perlcritic errors $file\n" if $ENV{GIT_HOOK_DEBUG};
+my $contents = `git show :$file`;
+my $critic = Perl::Critic->new;
+my @violations = $critic->critique(\$contents);
+if ( @violations ) {
+    reject("perlcritic violations", \@violations);
+}
+
+##############################################################################
+## Run perl -c syntax check
+##
+## Because we don't have a physical file to perl -c (staged file is not working
+## file) we need to either either cat the contents and perl -c STDIN or copy
+## the file to a temporary location.
+## cat $file | perl -c has issues, it seems to have a character limit (can't
+## find this on google).
+##
+## This pretty much never works because of things like FindBin
+## So disabling it
+
+# warn "Copying perl file $file for perl -c \n" if $ENV{GIT_HOOK_DEBUG};
+# my $path = path($file);
+# my $name = $path->basename;
+# my $dir  = $path->parent->stringify;
+
+# my $tempdir = Path::Tiny->tempdir;
+# my $newdir = path($tempdir, $dir);
+# $newdir->mkpath;
+# my $copy = $path->copy($newdir);
+# system "git show :$file > $copy";
+
+# warn "--------------------\n\n" if $ENV{GIT_HOOK_DEBUG};
+
+# my ( $ok, $err, $buff ) = run(command => "perl -c $copy");
+# if ( !$ok ) {
+#     reject("$file failed perl -c", $buff);
+# }
+
+sub reject {
+    my ($title, $messages) = @_;
+    die "REJECT: $title\n", join("\n", @{$messages || []}), "\n";
+}
